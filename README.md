@@ -1,9 +1,5 @@
 # PostgreSQL Blind SQL Injection Enumerator
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/xbz0n/psql-enum/main/logo.png" alt="PostgreSQL Blind SQLi Enumerator Logo" width="300"/>
-</p>
-
 A comprehensive tool for exploiting time-based blind SQL injection vulnerabilities in PostgreSQL databases. This tool enables database enumeration, data extraction, and security assessment through a sophisticated time-based technique.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
