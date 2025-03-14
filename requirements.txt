@@ -1,0 +1,11 @@
+requests>=2.25.1
+urllib3>=1.26.5
+concurrent.futures
+datetime
+argparse
+re
+json
+time
+sys
+os
+signal 
